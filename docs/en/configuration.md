@@ -49,6 +49,6 @@ After editing `.env`, run `./monra restart` and `./monra doctor`.
 
 ## Image versions
 
-`versions.env` is the only image selection file. Infrastructure entries are digest-pinned. Application releases initially use semantic tags; after publishing a release, replace each with `tag@sha256:<manifest-digest>` to make it immutable across registries and time.
+`versions.env` is the only image selection file. Infrastructure entries are digest-pinned. Application entries use both a semantic tag and its multi-platform manifest digest (`tag@sha256:<manifest-digest>`); Docker selects the digest, while the tag makes the release recognizable to an operator. Change both values together only after the matching component release completes.
 
 Never use `latest` in a production deployment.

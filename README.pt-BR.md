@@ -25,7 +25,7 @@ flowchart LR
 - O PostgreSQL usa papéis e bancos separados para Studio e WA Service.
 - As migrações do Studio rodam uma vez e precisam concluir antes da aplicação iniciar.
 - Webhooks são autenticados com HMAC-SHA256 sobre o corpo exato da requisição.
-- Imagens de infraestrutura são fixadas por digest multiplataforma. As imagens das aplicações ficam fixadas pela tag de release até existir o primeiro digest publicado.
+- Imagens de infraestrutura e aplicações são fixadas por digest multiplataforma; as referências das aplicações mantêm a tag semântica de release para facilitar a leitura.
 
 Veja [Arquitetura](./docs/pt-BR/architecture.md) para decisões e concessões.
 
@@ -98,9 +98,13 @@ O instalador cria o `.env`; o usuário normal não precisa copiar o exemplo manu
 
 ## Modelo de releases
 
-Os repositórios das aplicações publicam imagens multiplataforma a partir de tags semânticas, com SBOM, proveniência e atestações do GitHub. Este repositório fixa a release escolhida. Assim, atualizações são revisáveis e nunca seguem `latest` silenciosamente.
+Os repositórios das aplicações publicam imagens multiplataforma a partir de tags semânticas, com SBOM e proveniência OCI. Repositórios públicos dos componentes também publicam atestações de artefatos do GitHub; os privados mantêm os metadados OCI porque o GitHub limita esse recurso nesses casos. Este repositório fixa a release escolhida. Assim, atualizações são revisáveis e nunca seguem `latest` silenciosamente.
 
-A configuração inicial referencia `v0.1.0`. Essas tags dos componentes precisam ser publicadas antes que uma instalação remota nova consiga baixá-las.
+A configuração inicial seleciona `v0.1.1` pelos digests publicados dos manifestos multiplataforma. Mover uma tag não consegue mudar os bytes da imagem escolhida por este deploy.
+
+### Acesso aos pacotes
+
+Para que o início rápido não exija login, os dois pacotes Container no GHCR precisam ser públicos. Tornar um pacote público não torna seu repositório de código público, mas expõe as camadas do container e não pode ser desfeito no GitHub. Se os pacotes permanecerem privados intencionalmente, cada operador precisa se autenticar com uma credencial de pacote somente de leitura antes de executar `./monra install`; veja [Solução de problemas](./docs/pt-BR/troubleshooting.md).
 
 ## Aviso importante
 

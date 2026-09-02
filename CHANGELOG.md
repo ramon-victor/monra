@@ -2,6 +2,18 @@
 
 All notable deployment changes are documented here. / Todas as mudanças relevantes do deploy são documentadas aqui.
 
+## [0.1.1] - 2026-09-02
+
+### English
+
+- Pinned the Studio and WA Service `v0.1.1` releases to their published multi-platform manifest digests.
+- Clarified the public-versus-private GHCR package decision and the private-repository GitHub attestation limitation.
+
+### Português (Brasil)
+
+- Fixou as releases `v0.1.1` do Studio e WA Service pelos digests publicados dos manifestos multiplataforma.
+- Esclareceu a decisão entre pacotes GHCR públicos e privados e a limitação de atestação do GitHub em repositórios privados.
+
 ## [0.1.0] - 2026-09-01
 
 ### English

@@ -12,7 +12,7 @@ Never paste complete logs publicly without reviewing them for phone numbers, mes
 
 ## Images cannot be pulled
 
-If the registry reports `not found`, verify the application versions in `versions.env` exist in GHCR and are public. The initial `v0.1.0` references require the matching component releases to have been published. If access is denied for a private package, authenticate with a read-only token using `docker login ghcr.io`.
+If the registry reports `not found` or `unauthorized`, verify that the `v0.1.1` application references in `versions.env` exist in GHCR and that their manifest digests match the component releases. Public Container packages pull anonymously. For an intentionally private package, authenticate with a read-only token using `docker login ghcr.io` before installing.
 
 ## `studio-migrate` failed
 

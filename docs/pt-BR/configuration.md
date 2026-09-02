@@ -49,6 +49,6 @@ Depois de editar o `.env`, execute `./monra restart` e `./monra doctor`.
 
 ## Versões de imagens
 
-`versions.env` é o único arquivo de seleção de imagens. A infraestrutura é fixada por digest. As aplicações começam com tags semânticas; após publicar uma release, substitua cada uma por `tag@sha256:<manifest-digest>` para torná-la imutável no tempo e no registry.
+`versions.env` é o único arquivo de seleção de imagens. A infraestrutura é fixada por digest. As aplicações usam uma tag semântica junto do digest do manifesto multiplataforma (`tag@sha256:<manifest-digest>`); o Docker seleciona o digest, enquanto a tag permite que o operador reconheça a release. Altere os dois valores juntos somente depois que a release correspondente do componente terminar.
 
 Nunca use `latest` em produção.

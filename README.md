@@ -25,7 +25,7 @@ flowchart LR
 - PostgreSQL uses separate roles and databases for Studio and WA Service.
 - Studio migrations run once and must succeed before Studio starts.
 - Webhooks are authenticated with HMAC-SHA256 over the exact request body.
-- Infrastructure images are pinned by multi-platform digest. Application images are pinned by release tag until their first published digest is available.
+- Infrastructure and application images are pinned by multi-platform digest; application references retain their semantic release tag for readability.
 
 See [Architecture](./docs/en/architecture.md) for the decisions and tradeoffs.
 
@@ -98,9 +98,13 @@ The installer creates `.env`; normal users should not copy the example manually.
 
 ## Release model
 
-Application repositories publish multi-architecture images from semantic version tags with SBOMs, provenance, and GitHub attestations. This repository pins the selected release. Updates are therefore reviewable and do not silently follow `latest`.
+Application repositories publish multi-architecture images from semantic version tags with SBOMs and OCI provenance. Public component repositories also publish GitHub artifact attestations; private repositories retain the OCI metadata because GitHub limits its artifact-attestation feature there. This repository pins the selected release. Updates are therefore reviewable and do not silently follow `latest`.
 
-The initial configuration references `v0.1.0`. Those component tags must be published before a fresh remote installation can pull them.
+The initial configuration selects `v0.1.1` through its published multi-platform manifest digests. A moved tag cannot change the image bytes selected by this deployment.
+
+### Package access
+
+A no-login quick start requires both GHCR Container packages to be public. Making a package public does not make its source repository public, but it does expose the package's container layers and cannot be reversed on GitHub. If the packages intentionally remain private, each operator must authenticate with a read-only package credential before running `./monra install`; see [Troubleshooting](./docs/en/troubleshooting.md).
 
 ## Important notice
 

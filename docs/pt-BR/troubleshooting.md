@@ -12,7 +12,7 @@ Nunca publique logs completos sem revisar números de telefone, mensagens, token
 
 ## As imagens não são baixadas
 
-Se o registry responder `not found`, confirme que as versões de aplicação em `versions.env` existem no GHCR e são públicas. As referências iniciais `v0.1.0` exigem que as releases correspondentes dos componentes tenham sido publicadas. Para um pacote privado, autentique com token somente de leitura usando `docker login ghcr.io`.
+Se o registry responder `not found` ou `unauthorized`, confirme que as referências das aplicações `v0.1.1` em `versions.env` existem no GHCR e que os digests de manifesto correspondem às releases dos componentes. Pacotes Container públicos são baixados anonimamente. Para um pacote mantido privado intencionalmente, autentique com token somente de leitura usando `docker login ghcr.io` antes da instalação.
 
 ## `studio-migrate` falhou
 

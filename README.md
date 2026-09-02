@@ -2,9 +2,47 @@
 
 [Português (Brasil)](./README.pt-BR.md)
 
-The supported, beginner-friendly way to run the complete Monra stack on one server. This repository does not merge the application source histories: it coordinates versioned images from [Monra Studio](https://github.com/ramon-victor/monra-studio) and [Monra WA Service](https://github.com/ramon-victor/monra-wa-service).
+Deploy and operate the complete Monra stack on a single host.
 
-That separation keeps each component independently testable and releasable while giving operators one installation, upgrade, backup, and recovery workflow.
+This repository contains the production deployment for [Monra Studio](https://github.com/ramon-victor/monra-studio) and [Monra WA Service](https://github.com/ramon-victor/monra-wa-service), including installation, upgrades, backups, and recovery.
+
+## Prerequisites
+
+- Linux, macOS, or Windows with WSL2
+- Docker Engine with Docker Compose v2.20 or later
+- `curl`, `openssl`, Git, and Bash
+- At least 2 CPU cores, 4 GB RAM, and 20 GB of available disk space
+- Access to the images selected in [`versions.env`](./versions.env). Public GHCR packages pull without sign-in; private packages require `docker login ghcr.io`.
+
+## Quick start
+
+### Local deployment
+
+```bash
+git clone https://github.com/ramon-victor/monra.git
+cd monra
+./monra install
+```
+
+When installation completes, open <http://localhost:5522>. The installer creates the runtime configuration, generates independent secrets, pulls the selected images, applies migrations, and waits for readiness.
+
+### Internet-facing deployment with HTTPS
+
+Point the domain's A/AAAA records to the host, allow inbound TCP 80/443 and UDP 443, then run:
+
+```bash
+./monra install --domain monra.example.com --email admin@example.com
+```
+
+Caddy obtains and renews the TLS certificate automatically.
+
+### Private-network deployment (HTTP)
+
+```bash
+./monra install --bind 192.168.1.50
+```
+
+Use this mode only on an address protected by your private-network controls. For an Internet-facing deployment, use the domain and HTTPS mode instead.
 
 ## Architecture
 
@@ -20,75 +58,34 @@ flowchart LR
     WA -->|signed webhook| Studio
 ```
 
-- Only Studio is published by default, bound to `127.0.0.1:5522`.
-- WA Service, PostgreSQL, and Valkey are not exposed on host ports.
+- Studio is the sole service exposed on the host by default, bound to `127.0.0.1:5522`.
+- WA Service, PostgreSQL, and Valkey remain on the internal Compose network.
 - PostgreSQL uses separate roles and databases for Studio and WA Service.
-- Studio migrations run once and must succeed before Studio starts.
-- Webhooks are authenticated with HMAC-SHA256 over the exact request body.
-- Infrastructure and application images are pinned by multi-platform digest; application references retain their semantic release tag for readability.
+- Studio migrations must complete before the application starts.
+- Webhooks use HMAC-SHA256 over the exact request body.
+- Every infrastructure and application image is pinned to a multi-platform digest.
 
-See [Architecture](./docs/en/architecture.md) for the decisions and tradeoffs.
+See [Architecture](./docs/en/architecture.md) for design decisions and tradeoffs.
 
-## Requirements
-
-- A Linux server, macOS, or Windows with WSL2
-- Docker Engine with Docker Compose v2.20 or newer
-- `curl`, `openssl`, Git, and Bash
-- Recommended minimum: 2 CPU cores, 4 GB RAM, and 20 GB free disk
-
-For a public installation, point a domain's A/AAAA record to the server and allow inbound TCP 80/443 plus UDP 443.
-
-## Quick start
-
-### Private installation on this computer
-
-```bash
-git clone https://github.com/ramon-victor/monra.git
-cd monra
-./monra install
-```
-
-Open <http://localhost:5522>. The installer generates independent credentials, stores them in `.env` with mode `600`, pulls the pinned images, applies migrations, and waits for readiness.
-
-### Public domain with automatic HTTPS
-
-```bash
-./monra install --domain monra.example.com --email admin@example.com
-```
-
-Caddy obtains and renews certificates automatically. Ports 80 and 443 must reach this host.
-
-### Trusted LAN only
-
-```bash
-./monra install --bind 192.168.1.50
-```
-
-This serves plain HTTP on that private address. Do not use `0.0.0.0` on an untrusted network; use the domain/HTTPS mode instead.
-
-## Daily operations
+## Operations
 
 ```bash
 ./monra status
-./monra logs studio
 ./monra doctor
+./monra logs studio
 ./monra backup
 ./monra update
-./monra stop
-./monra start
 ```
 
-Restore is intentionally explicit and validates checksums first:
+Restores are explicit and verify checksums before modifying data:
 
 ```bash
 ./monra restore backups/20260901T120000Z
 ```
 
-Backups contain database data, Valkey data, image versions, and secrets. Copy them to encrypted off-host storage and protect them like production credentials.
+## Documentation
 
-## Configuration
-
-The installer creates `.env`; normal users should not copy the example manually. Optional AI provider keys remain blank and can be added later. Image versions and digests live in [`versions.env`](./versions.env).
+The installer writes `.env`; do not copy the example file for a normal installation. Optional AI-provider keys are blank by default. Image selection is managed through [`versions.env`](./versions.env).
 
 - [Configuration reference](./docs/en/configuration.md)
 - [Operations, backup, restore, and updates](./docs/en/operations.md)
@@ -96,20 +93,14 @@ The installer creates `.env`; normal users should not copy the example manually.
 - [Troubleshooting](./docs/en/troubleshooting.md)
 - [Security guide](./docs/en/security.md)
 
-## Release model
+## Release policy
 
-Application repositories publish multi-architecture images from semantic version tags with SBOMs and OCI provenance. Public component repositories also publish GitHub artifact attestations; private repositories retain the OCI metadata because GitHub limits its artifact-attestation feature there. This repository pins the selected release. Updates are therefore reviewable and do not silently follow `latest`.
+`versions.env` is the deployment lockfile: it pins the exact image manifests that run on the host. Review changes to it before running `./monra update`. Component releases include multi-architecture images, SBOMs, and OCI provenance; this repository never follows `latest`.
 
-The initial configuration selects `v0.1.1` through its published multi-platform manifest digests. A moved tag cannot change the image bytes selected by this deployment.
+## WhatsApp integration
 
-### Package access
+Monra uses an unofficial WhatsApp Web integration. Use a dedicated number, obtain the required consent, comply with applicable law and WhatsApp policies, and account for the risk of account suspension and protocol changes. Monra is not affiliated with WhatsApp or Meta.
 
-A no-login quick start requires both GHCR Container packages to be public. Making a package public does not make its source repository public, but it does expose the package's container layers and cannot be reversed on GitHub. If the packages intentionally remain private, each operator must authenticate with a read-only package credential before running `./monra install`; see [Troubleshooting](./docs/en/troubleshooting.md).
+## Security and license
 
-## Important notice
-
-Monra uses an unofficial WhatsApp Web integration. Use a dedicated number, obtain all required consent, follow applicable law and WhatsApp policies, and expect account or protocol compatibility risk. This project is not affiliated with WhatsApp or Meta.
-
-## License and security
-
-Licensed under [Apache-2.0](./LICENSE). Report vulnerabilities through [private vulnerability reporting](./SECURITY.md), never through an issue containing credentials or real message data.
+Monra is licensed under [Apache-2.0](./LICENSE). See [Contributing](./CONTRIBUTING.md) for the contributor workflow. Report vulnerabilities through [private vulnerability reporting](./SECURITY.md); never include credentials or real message data in an issue.

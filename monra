@@ -1,0 +1,581 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="$ROOT_DIR/compose.yaml"
+ENV_FILE="$ROOT_DIR/.env"
+ENV_EXAMPLE_FILE="$ROOT_DIR/.env.example"
+VERSIONS_FILE="$ROOT_DIR/versions.env"
+BACKUPS_DIR="$ROOT_DIR/backups"
+LAST_BACKUP=""
+BACKUP_WRITERS_PAUSED="false"
+
+info() {
+  printf '==> %s\n' "$*"
+}
+
+warn() {
+  printf 'warning: %s\n' "$*" >&2
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Monra deployment manager
+
+Usage:
+  ./monra install [--bind IPv4] [--port PORT]
+                  [--domain DOMAIN --email EMAIL]
+                  [--no-pull] [--no-start]
+  ./monra start | stop | restart | status | doctor
+  ./monra logs [studio|wa|postgres|valkey|caddy|migrate|all]
+  ./monra backup
+  ./monra restore BACKUP_DIRECTORY [--yes]
+  ./monra update
+
+Run ./monra help for this message. Documentation is available in docs/.
+EOF
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+check_docker() {
+  require_command docker
+  docker info >/dev/null 2>&1 || die "Docker is not running or your user cannot access it"
+  docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
+}
+
+env_value() {
+  local file="$1"
+  local key="$2"
+  awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$file"
+}
+
+require_config() {
+  [ -f "$ENV_FILE" ] || die "missing .env; run ./monra install first"
+  [ -f "$VERSIONS_FILE" ] || die "missing versions.env"
+}
+
+compose() {
+  local -a command=(
+    docker compose
+    --project-directory "$ROOT_DIR"
+    --file "$COMPOSE_FILE"
+    --env-file "$VERSIONS_FILE"
+    --env-file "$ENV_FILE"
+  )
+
+  if [ "$(env_value "$ENV_FILE" MONRA_ENABLE_HTTPS)" = "true" ]; then
+    command+=(--profile public)
+  fi
+
+  "${command[@]}" "$@"
+}
+
+random_secret() {
+  openssl rand -hex 32
+}
+
+validate_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] || die "port must be numeric"
+  ((1 <= 10#$1 && 10#$1 <= 65535)) || die "port must be between 1 and 65535"
+}
+
+validate_ipv4() {
+  awk -F. '
+    NF != 4 { exit 1 }
+    { for (i = 1; i <= 4; i++) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1 }
+  ' <<<"$1" || die "--bind must be a valid IPv4 address"
+}
+
+validate_domain() {
+  [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || die "invalid domain name"
+  [[ "$1" == *.* ]] || die "domain must contain a dot"
+}
+
+validate_email() {
+  [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || die "invalid email address"
+}
+
+install_command() {
+  check_docker
+  require_command openssl
+
+  local bind_ip="127.0.0.1"
+  local port="5522"
+  local domain=""
+  local email=""
+  local pull_images="true"
+  local start_services="true"
+
+  while (($#)); do
+    case "$1" in
+      --bind)
+        (($# >= 2)) || die "--bind requires a value"
+        bind_ip="$2"
+        shift 2
+        ;;
+      --port)
+        (($# >= 2)) || die "--port requires a value"
+        port="$2"
+        shift 2
+        ;;
+      --domain)
+        (($# >= 2)) || die "--domain requires a value"
+        domain="$2"
+        shift 2
+        ;;
+      --email)
+        (($# >= 2)) || die "--email requires a value"
+        email="$2"
+        shift 2
+        ;;
+      --no-pull)
+        pull_images="false"
+        shift
+        ;;
+      --no-start)
+        start_services="false"
+        shift
+        ;;
+      *) die "unknown install option: $1" ;;
+    esac
+  done
+
+  validate_ipv4 "$bind_ip"
+  validate_port "$port"
+
+  local public_url
+  local trusted_origins
+  local enable_https="false"
+  if [ -n "$domain" ]; then
+    validate_domain "$domain"
+    [ -n "$email" ] || die "--email is required with --domain"
+    validate_email "$email"
+    enable_https="true"
+    public_url="https://$domain"
+    trusted_origins="$public_url"
+  else
+    [ -z "$email" ] || die "--email is only used with --domain"
+    if [ "$bind_ip" = "127.0.0.1" ]; then
+      public_url="http://localhost:$port"
+      trusted_origins="$public_url,http://127.0.0.1:$port"
+    else
+      public_url="http://$bind_ip:$port"
+      trusted_origins="$public_url"
+    fi
+  fi
+
+  if [ -f "$ENV_FILE" ]; then
+    die ".env already exists; it was not overwritten. Use ./monra start or move it aside intentionally."
+  fi
+
+  umask 077
+  {
+    printf 'MONRA_BIND_IP=%s\n' "$bind_ip"
+    printf 'MONRA_PORT=%s\n' "$port"
+    printf 'MONRA_PUBLIC_URL=%s\n' "$public_url"
+    printf 'MONRA_TRUSTED_ORIGINS=%s\n' "$trusted_origins"
+    printf 'MONRA_ENABLE_HTTPS=%s\n' "$enable_https"
+    printf 'MONRA_DOMAIN=%s\n' "$domain"
+    printf 'MONRA_ACME_EMAIL=%s\n' "$email"
+    printf '\n'
+    printf 'MONRA_POSTGRES_ADMIN_PASSWORD=%s\n' "$(random_secret)"
+    printf 'MONRA_STUDIO_DB_PASSWORD=%s\n' "$(random_secret)"
+    printf 'MONRA_WA_DB_PASSWORD=%s\n' "$(random_secret)"
+    printf 'MONRA_VALKEY_PASSWORD=%s\n' "$(random_secret)"
+    printf 'MONRA_AUTH_SECRET=%s\n' "$(random_secret)"
+    printf 'MONRA_WA_API_KEY=%s\n' "$(random_secret)"
+    printf 'MONRA_WEBHOOK_SECRET=%s\n' "$(random_secret)"
+    printf '\n'
+    sed -n '/^MONRA_SAVE_MESSAGES=/,$p' "$ENV_EXAMPLE_FILE"
+  } >"$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+
+  info "configuration written to .env with mode 600"
+  compose config --quiet
+
+  if [ "$pull_images" = "true" ]; then
+    info "pulling pinned images"
+    compose pull
+  fi
+
+  if [ "$start_services" = "true" ]; then
+    start_command
+  else
+    info "configuration validated; run ./monra start when ready"
+  fi
+}
+
+access_url() {
+  env_value "$ENV_FILE" MONRA_PUBLIC_URL
+}
+
+wait_ready() {
+  local bind_ip
+  local port
+  bind_ip="$(env_value "$ENV_FILE" MONRA_BIND_IP)"
+  port="$(env_value "$ENV_FILE" MONRA_PORT)"
+
+  if [ "$bind_ip" = "0.0.0.0" ]; then
+    bind_ip="127.0.0.1"
+  fi
+
+  local _
+  for _ in {1..60}; do
+    if curl --fail --silent --show-error --max-time 3 \
+      "http://$bind_ip:$port/api/health/ready" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  return 1
+}
+
+start_command() {
+  check_docker
+  require_config
+  require_command curl
+  info "starting Monra"
+  compose up --detach --wait --wait-timeout 240
+  wait_ready || die "services started but readiness did not succeed; run ./monra logs"
+  info "Monra is ready at $(access_url)"
+}
+
+stop_command() {
+  check_docker
+  require_config
+  info "stopping application services (data is preserved)"
+  compose stop
+}
+
+restart_command() {
+  check_docker
+  require_config
+  info "reconciling Monra with the current configuration"
+  compose up --detach --force-recreate --wait --wait-timeout 240
+  wait_ready || die "restart completed but readiness did not succeed; run ./monra logs"
+  info "Monra is ready at $(access_url)"
+}
+
+status_command() {
+  check_docker
+  require_config
+  compose ps
+}
+
+logs_command() {
+  check_docker
+  require_config
+  local service="${1:-all}"
+  case "$service" in
+    studio) compose logs --follow --tail=200 studio ;;
+    wa) compose logs --follow --tail=200 wa ;;
+    postgres) compose logs --follow --tail=200 postgres ;;
+    valkey) compose logs --follow --tail=200 valkey ;;
+    caddy) compose logs --follow --tail=200 caddy ;;
+    migrate) compose logs --tail=200 studio-migrate ;;
+    all) compose logs --follow --tail=200 ;;
+    *) die "unknown service: $service" ;;
+  esac
+}
+
+restart_writers() {
+  info "starting application services"
+  compose up --detach --wait --wait-timeout 240 valkey wa studio >/dev/null
+}
+
+backup_exit_cleanup() {
+  local exit_code="$?"
+
+  if [ "$BACKUP_WRITERS_PAUSED" = "true" ]; then
+    warn "backup was interrupted; attempting to restart application services"
+    if ! restart_writers; then
+      warn "automatic restart failed; run ./monra start after checking the logs"
+    fi
+  fi
+
+  exit "$exit_code"
+}
+
+backup_create() {
+  check_docker
+  require_config
+  require_command sha256sum
+
+  local timestamp
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  local backup_dir="$BACKUPS_DIR/$timestamp"
+  mkdir -p "$backup_dir/config"
+  chmod 700 "$BACKUPS_DIR" "$backup_dir" "$backup_dir/config"
+
+  info "pausing application writers for a consistent backup"
+  BACKUP_WRITERS_PAUSED="true"
+  trap backup_exit_cleanup EXIT
+  compose stop studio wa >/dev/null
+
+  local backup_failed="false"
+  if ! compose exec -T postgres pg_dumpall -U monra_admin --globals-only >"$backup_dir/postgres-globals.sql"; then
+    backup_failed="true"
+  fi
+  if ! compose exec -T postgres pg_dump -U monra_admin -Fc monra_studio >"$backup_dir/monra_studio.dump"; then
+    backup_failed="true"
+  fi
+  if ! compose exec -T postgres pg_dump -U monra_admin -Fc monra_wa_auth >"$backup_dir/monra_wa_auth.dump"; then
+    backup_failed="true"
+  fi
+  if ! compose exec -T postgres pg_dump -U monra_admin -Fc monra_wa_users >"$backup_dir/monra_wa_users.dump"; then
+    backup_failed="true"
+  fi
+
+  # Expansion happens inside the container, where VALKEY_PASSWORD is defined.
+  # shellcheck disable=SC2016
+  if ! compose exec -T valkey sh -c 'REDISCLI_AUTH="$VALKEY_PASSWORD" valkey-cli SAVE >/dev/null'; then
+    backup_failed="true"
+  fi
+  compose stop valkey >/dev/null
+
+  local helper_image
+  helper_image="$(env_value "$VERSIONS_FILE" ALPINE_IMAGE)"
+  if ! docker run --rm \
+    --volume monra_valkey_data:/data:ro \
+    --volume "$backup_dir:/backup" \
+    "$helper_image" \
+    tar -czf /backup/valkey-data.tar.gz -C /data .; then
+    backup_failed="true"
+  fi
+  if ! docker run --rm \
+    --volume "$backup_dir:/backup" \
+    "$helper_image" \
+    chown "$(id -u):$(id -g)" /backup/valkey-data.tar.gz; then
+    backup_failed="true"
+  fi
+
+  restart_writers
+  BACKUP_WRITERS_PAUSED="false"
+  trap - EXIT
+
+  if [ "$backup_failed" = "true" ]; then
+    die "backup failed; application services were restarted"
+  fi
+
+  cp "$ENV_FILE" "$backup_dir/config/.env"
+  cp "$VERSIONS_FILE" "$backup_dir/config/versions.env"
+  cp "$COMPOSE_FILE" "$backup_dir/config/compose.yaml"
+  cp "$ROOT_DIR/Caddyfile" "$backup_dir/config/Caddyfile"
+  chmod 600 "$backup_dir/config/.env"
+
+  {
+    printf 'created_at=%s\n' "$timestamp"
+    printf 'git_commit=%s\n' "$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf unknown)"
+    printf 'format=1\n'
+  } >"$backup_dir/manifest.txt"
+
+  local checksum_file
+  checksum_file="$(mktemp)"
+  (
+    cd "$backup_dir"
+    find . -type f ! -name SHA256SUMS -print0 \
+      | sort -z \
+      | xargs -0 sha256sum >"$checksum_file"
+  )
+  mv "$checksum_file" "$backup_dir/SHA256SUMS"
+  chmod -R go-rwx "$backup_dir"
+
+  LAST_BACKUP="$backup_dir"
+  info "backup completed: $backup_dir"
+}
+
+backup_command() {
+  backup_create
+}
+
+validate_backup() {
+  local backup_dir="$1"
+  [ -d "$backup_dir" ] || die "backup directory not found: $backup_dir"
+  for file in SHA256SUMS monra_studio.dump monra_wa_auth.dump monra_wa_users.dump valkey-data.tar.gz; do
+    [ -f "$backup_dir/$file" ] || die "backup is missing $file"
+  done
+  (cd "$backup_dir" && sha256sum --check --quiet SHA256SUMS) \
+    || die "backup checksum validation failed"
+}
+
+restore_database() {
+  local database="$1"
+  local owner="$2"
+  local dump_file="$3"
+
+  compose exec -T postgres psql -U monra_admin -d postgres --set=ON_ERROR_STOP=1 \
+    --command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$database' AND pid <> pg_backend_pid();" \
+    >/dev/null
+  compose exec -T postgres dropdb -U monra_admin --if-exists "$database"
+  compose exec -T postgres createdb -U monra_admin --owner="$owner" "$database"
+  compose exec -T postgres pg_restore -U monra_admin --role="$owner" --no-owner --dbname="$database" <"$dump_file"
+}
+
+restore_data() {
+  local backup_dir="$1"
+  validate_backup "$backup_dir"
+
+  info "stopping services for restore"
+  compose stop caddy studio wa valkey >/dev/null 2>&1 || true
+
+  info "restoring PostgreSQL databases"
+  restore_database monra_studio monra_studio "$backup_dir/monra_studio.dump"
+  restore_database monra_wa_auth monra_wa "$backup_dir/monra_wa_auth.dump"
+  restore_database monra_wa_users monra_wa "$backup_dir/monra_wa_users.dump"
+
+  info "restoring Valkey data"
+  local helper_image
+  helper_image="$(env_value "$VERSIONS_FILE" ALPINE_IMAGE)"
+  docker run --rm --volume monra_valkey_data:/data "$helper_image" \
+    sh -c 'rm -rf /data/* /data/.[!.]* /data/..?*'
+  docker run --rm \
+    --volume monra_valkey_data:/data \
+    --volume "$backup_dir:/backup:ro" \
+    "$helper_image" \
+    tar -xzf /backup/valkey-data.tar.gz -C /data
+
+  info "starting restored deployment"
+  compose up --detach --wait --wait-timeout 240
+  wait_ready || die "restore completed but readiness failed; services remain available for inspection"
+  info "restore completed successfully"
+}
+
+restore_command() {
+  check_docker
+  require_config
+  require_command sha256sum
+  require_command curl
+
+  local backup_dir="${1:-}"
+  [ -n "$backup_dir" ] || die "usage: ./monra restore BACKUP_DIRECTORY [--yes]"
+  shift || true
+
+  local confirmed="false"
+  if [ "${1:-}" = "--yes" ]; then
+    confirmed="true"
+  elif [ -n "${1:-}" ]; then
+    die "unknown restore option: $1"
+  fi
+
+  backup_dir="$(cd -- "$backup_dir" 2>/dev/null && pwd)" \
+    || die "backup directory not found"
+  validate_backup "$backup_dir"
+
+  if [ "$confirmed" != "true" ]; then
+    printf 'Restore will replace the current PostgreSQL and Valkey data. Type RESTORE to continue: '
+    read -r answer
+    [ "$answer" = "RESTORE" ] || die "restore cancelled"
+  fi
+
+  restore_data "$backup_dir"
+}
+
+update_command() {
+  check_docker
+  require_config
+  require_command curl
+  require_command sha256sum
+  require_command git
+
+  [ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=no)" ] \
+    || die "tracked files have local changes; commit or revert them before updating"
+
+  local previous_commit
+  previous_commit="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+
+  backup_create
+
+  info "fetching deployment updates"
+  git -C "$ROOT_DIR" pull --ff-only
+
+  info "pulling updated images"
+  if compose pull && compose up --detach --wait --wait-timeout 240 && wait_ready; then
+    info "update completed successfully"
+    return 0
+  fi
+
+  warn "update failed; rolling back code, images, and data"
+  git -C "$ROOT_DIR" switch --detach "$previous_commit"
+  compose pull || true
+  restore_data "$LAST_BACKUP"
+  warn "rollback succeeded. The repository is now detached at $previous_commit."
+  warn "After investigating, return to your branch with: git switch main"
+  return 1
+}
+
+doctor_command() {
+  check_docker
+  require_config
+  require_command curl
+
+  local failures=0
+  info "checking configuration"
+  if compose config --quiet; then
+    printf 'ok: Compose configuration\n'
+  else
+    printf 'failed: Compose configuration\n' >&2
+    failures=$((failures + 1))
+  fi
+
+  local permissions
+  permissions="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || printf unknown)"
+  if [ "$permissions" = "600" ] || [ "$permissions" = "400" ]; then
+    printf 'ok: .env permissions (%s)\n' "$permissions"
+  else
+    printf 'warning: .env permissions are %s; recommended: 600\n' "$permissions" >&2
+    failures=$((failures + 1))
+  fi
+
+  if wait_ready; then
+    printf 'ok: Studio and required dependencies are ready\n'
+  else
+    printf 'failed: readiness endpoint\n' >&2
+    failures=$((failures + 1))
+  fi
+
+  local bind_ip
+  bind_ip="$(env_value "$ENV_FILE" MONRA_BIND_IP)"
+  if [ "$bind_ip" = "0.0.0.0" ] && [ "$(env_value "$ENV_FILE" MONRA_ENABLE_HTTPS)" != "true" ]; then
+    warn "Studio is exposed on every interface without the bundled HTTPS proxy"
+    failures=$((failures + 1))
+  else
+    printf 'ok: network binding (%s)\n' "$bind_ip"
+  fi
+
+  compose ps
+  df -h "$ROOT_DIR"
+
+  ((failures == 0)) || die "doctor found $failures issue(s)"
+  info "all checks passed"
+}
+
+main() {
+  local subcommand="${1:-help}"
+  shift || true
+
+  case "$subcommand" in
+    install) install_command "$@" ;;
+    start) start_command "$@" ;;
+    stop) stop_command "$@" ;;
+    restart) restart_command "$@" ;;
+    status) status_command "$@" ;;
+    logs) logs_command "$@" ;;
+    backup) backup_command "$@" ;;
+    restore) restore_command "$@" ;;
+    update) update_command "$@" ;;
+    doctor) doctor_command "$@" ;;
+    help|-h|--help) usage ;;
+    *) usage >&2; die "unknown command: $subcommand" ;;
+  esac
+}
+
+main "$@"

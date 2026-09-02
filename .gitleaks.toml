@@ -1,0 +1,4 @@
+title = "Monra deployment secret scanning"
+
+[extend]
+useDefault = true

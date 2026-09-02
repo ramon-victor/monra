@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check shell syntax
+        run: |
+          bash -n monra
+          sh -n scripts/postgres/init-databases.sh
+      - name: Run ShellCheck
+        run: >-
+          docker run --rm
+          -v "$PWD:/mnt:ro"
+          koalaman/shellcheck-alpine:v0.11.0@sha256:9955be09ea7f0dbf7ae942ac1f2094355bb30d96fffba0ec09f5432207544002
+          /bin/shellcheck /mnt/monra /mnt/scripts/postgres/init-databases.sh
+      - name: Lint GitHub Actions workflows
+        run: >-
+          docker run --rm
+          -v "$PWD:/repo:ro"
+          -w /repo
+          rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+      - name: Exercise installer and validate Compose
+        run: ./monra install --no-pull --no-start
+      - name: Check network exposure
+        run: |
+          docker compose --file compose.yaml --env-file versions.env --env-file .env config --format json > /tmp/compose.json
+          jq -e '.services.postgres.ports == null' /tmp/compose.json
+          jq -e '.services.valkey.ports == null' /tmp/compose.json
+          jq -e '.services.wa.ports == null' /tmp/compose.json
+          jq -e '.services.studio.ports | length == 1' /tmp/compose.json
+      - name: Check generated secret uniqueness and permissions
+        run: |
+          test "$(stat -c '%a' .env)" = 600
+          values=$(awk -F= '/^MONRA_(POSTGRES_ADMIN_PASSWORD|STUDIO_DB_PASSWORD|WA_DB_PASSWORD|VALKEY_PASSWORD|AUTH_SECRET|WA_API_KEY|WEBHOOK_SECRET)=/ { print $2 }' .env)
+          test "$(printf '%s\n' "$values" | sed '/^$/d' | wc -l)" = 7
+          test "$(printf '%s\n' "$values" | sed '/^$/d' | sort -u | wc -l)" = 7
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
